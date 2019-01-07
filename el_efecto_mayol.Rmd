@@ -1,0 +1,313 @@
+---
+title: "El Mayolazo"
+subtitle: "Un análisis de micro-reacciones en la web, usando datos de Facebook"
+author: "Daniel Valdenegro"
+date: "26 de agosto de 2017"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+
+```{r, include=FALSE}
+
+library(Rfacebook)
+library(ggplot2)
+library(scales)
+library(zoo)
+
+setwd("~/")
+
+load("fb_oauth")
+
+format_facebook_date <- function(datestring) {
+  date <- as.POSIXct(datestring, format = "%Y-%m-%dT%H:%M:%S+0000", tz = "GMT")
+}
+
+my_aggregate_metric <- function(metric, facebook_data) {
+  m <- aggregate(facebook_data[[paste0(metric, "_count")]], list(day = facebook_data$day), 
+                 mean)
+  m$day <- as.Date(m$day)
+  m$metric <- metric
+  m$m_av <- coredata(rollapply(zoo(m$x, m$day), 7, mean, na.rm = T, align = "right", partial = T))
+  return(m)
+}
+
+my_utility <- function(data, metrics){
+  data$datetime <- format_facebook_date(data$created_time)
+  data$month <- format(data$datetime, "%Y-%m")
+  data$day <- format(data$datetime, "%Y-%m-%d")
+  df.list <- lapply(metrics, my_aggregate_metric, facebook_data = data)
+  df <- do.call(rbind, df.list)
+  return(df)
+}
+
+rd <- read.csv2("rd.csv", stringsAsFactors = F)
+gj <- read.csv2("gj.csv", stringsAsFactors = F)
+fa <- read.csv2("fa.csv", stringsAsFactors = F)
+am <- read.csv2("am.csv", stringsAsFactors = F)
+
+```
+
+---
+
+### **Los antecedentes**
+
+Seguramente ustedes recordarán que, en la madrugada del martes 15 de agosto pasado, se desató una de las polémicas más sabrosas de la actual farándula política chilena. La Mesa Nacional del Frente Amplio, en una votación supuestamente unánime y extraordinaria, decidía no apoyar la eventual candidatura a diputado por el distrito 10 de Alberto Mayol, excandidato presidencial del mismo bloque político. No conformes con eso, lo vetaron de participar como candidato del Frente Amplio para cualquier otro distrito electoral, aduciendo "amedrentamiento político" y "violencia de género" en contra de Natalia Castillo, candidata a diputada por el distrito 10 de Revolución Democrática, a través de un audio enviado por de Whatsapp. Por su parte, Mayol se defendió acusando a Revolución Democrática, y en especial a Giorgio Jackson (diputado por distrito 10 y figura fundadora de Revolución Democrática y del Frente Amplio), de generar un complot, con el fin de sacarlo definitivamente de las filas de la colectividad, usando tácticas sucias, presentando a la opinión pública (como prueba de inocencia) el audio donde, supuestamente, amedrentaba y violentaba a Natalia Castillo.
+
+Para mala suerte del Frente Amplio (y de Giorgio Jackson) la opinión pública consideró que el audio en cuestión no era amedrentador ni contenía alguna agresión de género. Esto desató la furia de los frenteamplistas adherentes a Mayol, quienes dejaron escapar sus iracundas opiniones en las redes sociales, desencadenando (como suele ocurrir en internet) interminables discusiones, cargadas de descalificaciones, insultos, e información a medias. A esto le siguió una larga serie de publicaciones en la prensa respecto del evento, lo que llevó, días después, a la Mesa Nacional del Frente Amplio a retractarse de su veto y permitir a Mayol competir como diputado por el distrito 10, como parte de la colectividad.
+
+Las consecuencias de este tropiezo para el Frente Amplio no se han hecho esperar, llevando a la joven coalición política a su primera gran crisis interna, salpicando de paso a su candidata a la presidencia, Beatriz Sánchez, quien cayó 3 puntos porcentuales en intención de voto luego de los eventos del 15 de agosto. En suma, un tremendo costalazo, del cuál algunos dudan que puedan reponerse.
+
+Ahora bien, en medio de esta bataola, me surgió la duda de si este escenario podría dejar algún efecto en los seguidores de las redes sociales, que pudiera ser detectado en base a su comportamiento en la web. Los adherentes al Frente Amplio han sido caracterizados como usuarios particularmente asiduos a las redes sociales. La mayoría pertenecientes a una generación que nació junto a la Web 1.0, y que vio el amanecer de la interactividad con la Web 2.0, han pasado gran parte de sus vidas interactuando y compartiendo sus opiniones en la red, lo que no excluye sus posiciones y pareceres políticos, los cuales manifiestan y defienden con pasión, ya sea en Facebook, Twitter u otras. Con seguidores con estas características, era natural pensar que la crisis del Frente Amplio dejaría huella en el patrón de comportamiento de sus adherentes, en las diferentes plataformas de redes sociales de las que disponen.
+
+Por otro lado, la idea de encontrar alguna forma de estudiar las consecuencias de este evento usando datos web era una buenísima excusa para poner a prueba mis recientemente adquiridas habilidades de "web scraping", por lo que, tomando inspiración de un excelente artículo publicado por Robinson, D. (2016), titulado "Text analysis of Trump's tweets confirms he writes only the (angrier) Android half", me puse manos a la obra para generar una hipótesis lo suficientemente movilizadora como para trabajar en ella, y lo suficientemente simple como para ponerla a prueba con mis recientes (pero precarias) habilidades.
+
+El análisis, que presento más abajo, se realizó en base a la actividad de los seguidores de las páginas de Facebook de Revolución Democrática, Giorgio Jackson Diputado y Frente Amplio Chile. De estas tres, la que presenta mayores niveles de actividad es Frente Amplio Chile, por lo que usaré los datos de esta página para ejemplificar cada uno de los pasos del análisis. Mi hipótesis es que la tendencia de micro-reacciones ("comments", "shares", y "Facebook reactions") de los seguidores de estas páginas, fue afectada por los eventos del 15 de agosto. Más específicamente, espero encontrar un aumento sustantivo de micro-reacciones "angry" (enojo) en los posts publicados el 15 de mayo y los días siguientes, asociado a un aumento en los "comments" (comentarios) posteados por los usuarios el día 15 de agosto. Finalmente, pretendo establecer una relación entre estas dos métricas, de forma que la micro-reacción "angry" a una publicación debería llevar al mismo usuario a postear un "comment" en el mismo post. Esta hipótesis se basa en la idea, generalmente aceptada, de que el enojo es una emoción movilizadora, en especial en contextos de debate político (Becker & Tausch, 2015). Por otro lado, existe evidencia de que la participación en debates políticos a través de redes sociales predeciría, aunque débilmente, la participación en acciones activistas de mayor costo personal, como marchas, asambleas, petitorios, etc. (Kende et al., 2016; Postmes & Brunsting, 2002). Sin embargo, la mayoría de los estudios que analizan la relación entre emociones y activismo lo hace evaluando las intenciones de participación en activismo o auto-reporte de participación y no las acciones reales de los participantes. Dado esto, y dado también de que los datos aquí usados corresponden a acciones espontaneas de los usuarios, considero que el análisis que aquí presento está un poco más arriba de lo trivial.
+
+Por micro-reacciones entiendo la posibilidad que ofrecen muchas redes sociales de reaccionar a los contenidos publicados por otros usuarios de la misma. Estas acciones son de bajísimo costo atencional y cognitivo, tomando al usuario entre una fracción de segundo (e.g. "likes") hasta un par de minutos (e.g. "comments") en ser completadas. Facebook ofrece una relativamente amplia gama de micro-reacciones, entre las que resaltan las recientemente incorporadas "Facebook reactions", las cuales agregan un componente emocional específico a las micro-reacciones:
+
+![](https://fbnewsroomus.files.wordpress.com/2016/02/reactions-image-en_us.png)
+
+---
+
+### **El dataset**
+
+Los datos fueron extraídos de las páginas de Facebook de Revolución Democrática, Giorgio Jackson Diputado y Frente Amplio Chile. Afortunadamente, la extracción de los datos fue facilitada por la API de Facebook (Facebook Graph API), la cual proporciona un buen acceso a la información de uso público de las páginas de Facebook. Hasta hace poco, yo no tenía idea de lo que era una API (Application Programming Interface), así que dedicaré unas líneas para explicar de que se trata. Una API es, básicamente, una serie de protocolos y métodos, embebidos en la programación de un sitio web, que permiten a las aplicaciones externas al sitio, interactuar con el sitio y con los posibles datos producidos por este. La ventaja que entregan las API es que permiten extracción de datos de forma estructurada y sistemática. Sin embargo, cada sitio web desarrolla sus propias API, con sus propios protocolos específicos, y bajos sus propias reglas de confidencialidad respecto de sus usuarios, lo que obliga a desarrollar una aplicación específica para cada uno de los sitios con los que uno quiere trabajar.
+
+Afortunadamente para mí, alguien más (Barbera et al., 2017) ya había desarrollado un paquete en R para interactuar con Facebook Graph API.
+
+```{r, eval=FALSE, echo=TRUE}
+
+library(Rfacebook)
+
+setwd("C:/Users/Usuario/Documents/My_R_projects")
+
+fb_oauth <- fbOAuth(app_id="your_id", app_secret="your_secret_id", extended_permissions = TRUE)
+
+load(fb_oauth)
+
+```
+
+Lo único que fue necesario para iniciar la descarga de datos fue registrarme como desarrollador, y obtener un "Auth Token" (código de autentificación) que me permitiera el ingreso a la plataforma.
+
+Usando la función `getPage`, descargué información de todos los posts publicados en las páginas mencionadas desde el 01 de enero hasta el 23 de agosto de este año. El dataset contiene 16 variables, entra las que se encuentra el post mismo (texto), timestamp de publicación, y una serie de métricas: número de "shares", número de "comments", y número de cada uno de las "Facebook reactions", por cada post.
+
+```{r, eval=FALSE, echo=TRUE}
+
+fa <- getPage("FrenteAmpliodeChile", reactions = TRUE, fb_oauth, n = 1000, since='2017/01/01')
+
+```
+
+Los datasets finales contienen: 958 post para la página de Revolución Democrática; 676 post para la página de Giorgio Jackson Diputado; y 954 post para la página de Frente Amplio Chile. Debido a que estoy interesado en la tendencia de las micro-reacciones de los usuarios de estas páginas, incluí todos los tipos de post, sean estos actualizaciones de estado, imágenes, post compartidos, o videos.
+
+```{r, eval=TRUE, echo=TRUE}
+
+dim(fa)
+names(fa)
+
+```
+
+---
+
+### **Las métricas**
+
+Si bien Facebook Graph API, y `getPage` proveen de un dataset casi completamente limpio y estructurado, el timestamp de Facebook tiene un formato no muy conveniente para su análisis dentro del ambiente de R. Usé las siguientes funciones para trasformar el timestamp a formato POSIXct.
+
+```{r, eval=FALSE, echo=TRUE}
+
+format_facebook_date <- function(datestring) {
+  date <- as.POSIXct(datestring, format = "%Y-%m-%dT%H:%M:%S+0000", tz = "GMT")
+}
+
+```
+
+
+Con el fin de tener un dataset con series temporales con distancias homogéneas, agregue los datos de los posts por día, calculando un promedio diario de cada una de las métricas obtenidas.
+
+```{r, eval=FALSE, echo=TRUE}
+
+my_aggregate_metric <- function(metric, facebook_data) {
+  m <- aggregate(facebook_data[[paste0(metric, "_count")]], list(day = facebook_data$day), 
+                 mean)
+  m$day <- as.Date(m$day)
+  m$metric <- metric
+  m$m_av <- coredata(rollapply(zoo(m$x, m$day), 7, mean, na.rm = T, align = "right", partial = T))
+  return(m)
+}
+
+my_utility <- function(data, metrics){
+  data$datetime <- format_facebook_date(data$created_time)
+  data$month <- format(data$datetime, "%Y-%m")
+  data$day <- format(data$datetime, "%Y-%m-%d")
+  df.list <- lapply(metrics, my_aggregate_metric, facebook_data = data)
+  df <- do.call(rbind, df.list)
+  return(df)
+}
+
+```
+
+Es importante notar que en la función de arriba también calculé la media móvil simple del promedio diario de cada una de las métricas.
+
+---
+
+### **Las tendencias**
+
+El siguiente gráfico muestra el promedio diario de micro-reacciones de "likes", "shares" y "love" de los posts de la página de Facebook Frente Amplio Chile. En colores trasparentes está el dato real, y en la línea de color sólido está la media móvil simple, con una ventana de 7 días.
+
+```{r, eval=TRUE, echo=TRUE, fig.width=10, fig.height=6}
+
+metrics <- c("likes", "shares", "love")
+
+df_fa <- my_utility(fa, metrics)
+
+ggplot(df_fa, aes(x = day, y = x, group = metric, color = metric)) + 
+  geom_line(aes(color = metric), size = .5, alpha = .4) + 
+  geom_line(aes(x = day, y = m_av, color = metric), size = 1) + 
+  scale_x_date(date_breaks = "week", labels = date_format("%d-%m-%Y")) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text.x = element_text(angle = 270, hjust = 1)) +
+  ylab("Average_count_per_day") + 
+  ggtitle("Facebook page trends Frente Amplio", subtitle = "Moving Average (7 days) in solid line")
+
+```
+
+Lo primero interesante es que, al parecer, existe coincidencia entre las tendencias de estas métricas. Siendo todas de corte emocional positivo, pareciera que a más "likes" o "love" tiene un post, más probable es que obtenga un "share" (ser compartido). También es interesante notar que el número de micro-reacciones está directamente relacionado al costo de la micro-reacción. Por costo de las micro-reacciones me refiero a la cantidad de acciones que debe realizar un usuario para llevarla a cabo. Por ejemplo, los "likes" son la micro-reacción con menor costo, ya que el usuario sólo debe realizar una acción (presionar el ícono de "like") para completarla. Así tenemos que "likes" (1 acción) es la más común, seguida de "shares" (2 acciones) y "love" (3 acciones). Por último, los datos indican que no existe realmente un cambio sustantivo en la tendencia después del 15 de agosto. La única métrica sobre la que podría especular una caída desde esa fecha en adelante es "shares" la cual pareciera iniciar una tendencia menor a la vista en los meses anteriores.
+
+Aquí podemos ver la tendencia de las micro-reacciones "sad" y "wow".
+
+```{r, eval=TRUE, echo=TRUE, fig.width=10, fig.height=6}
+
+metrics <- c("sad", "wow")
+
+df_fa <- my_utility(fa, metrics)
+
+ggplot(df_fa, aes(x = day, y = x, group = metric, color = metric)) + 
+  geom_line(aes(color = metric), size = .5, alpha = .4) + 
+  geom_line(aes(x = day, y = m_av, color = metric), size = 1) + 
+  scale_x_date(date_breaks = "week", labels = date_format("%d-%m-%Y")) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text.x = element_text(angle = 270, hjust = 1)) +
+  ylab("Average_count_per_day") + 
+  ggtitle("Facebook page trends Frente Amplio", subtitle = "Moving Average (7 days) in solid line")
+
+```
+
+También se observa una traslape de las tendencias, pero en general no sobrepasan las 60 micro-reacciones diarias, sin un aumento realmente sustantivo hacia el 15 de agosto.
+
+Finalmente, el gráfico de las tendencias de las micro-reacciones "angry", "haha" y "comments" muestra algo interesante.
+
+```{r, eval=TRUE, echo=TRUE, fig.width=10, fig.height=6}
+
+metrics <- c("angry", "haha", "comments")
+
+df_fa <- my_utility(fa, metrics)
+
+ggplot(df_fa, aes(x = day, y = x, group = metric, color = metric)) + 
+  geom_line(aes(color = metric), size = .5, alpha = .4) + 
+  geom_line(aes(x = day, y = m_av, color = metric), size = 1) + 
+  scale_x_date(date_breaks = "week", labels = date_format("%d-%m-%Y")) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.text.x = element_text(angle = 270, hjust = 1)) +
+  ylab("Average_count_per_day") + 
+  ggtitle("Facebook page trends Frente Amplio", subtitle = "Moving Average (7 days) in solid line")
+
+```
+
+Lo primero es que las tendencias son, en general, cercanas a 0. Pero, hay algunos eventos que hacen que estas se disparen.
+
+Para el caso de la micro-reacción "angry" existen dos grandes eventos en donde el promedio diario supera los 500: El 9 de julio, con la publicación del fallo de la Corte Suprema acerca del caso Navila Rifo (algo totalmente ajeno a la coalición misma), y el 15 de agosto, con la publicación de la Mesa Nacional del Frente Amplio respecto al veto a la candidatura de Alberto Mayol.
+
+En el caso de los "comments" (la acción con más costo para el usuario), sólo el evento del 15 de agosto hace cambiar su tendencia, llegando también a un promedio muy por sobre los 500 comentarios diarios.
+
+Similares tendencias se pueden ver también en las páginas de Revolución Democrática y Giorgio Jackson Diputado.
+
+---
+
+### **El post**
+
+El día 15 de agosto de 2017, la página Frente Amplio Chile publicó el siguiente post:
+
+> "COMUNICADO DE LA MESA NACIONAL DEL FRENTE AMPLIO SOBRE LAS ASPIRACIONES PARLAMENTARIAS DE ALBERTO MAYOL"
+
+Y un link hacia una nota.
+
+El post recibió 652 "comments", y solo 10 "shares".
+
+Pueden ver el conteo de las demás micro-reacciones más abajo.
+
+```{r, eval=TRUE, echo=TRUE, fig.width=10, fig.height=6}
+
+a_post <- getPost(post = "1101539456638107_1309367002522017",  n = 3000, token = fb_oauth, reactions = T)
+
+comments <- a_post$comments
+
+reactions <- a_post$reactions
+
+reactions$comments <- as.numeric(reactions$from_name %in% comments$from_name)
+
+ggplot(reactions, aes(from_type)) +
+  geom_bar(aes(fill = as.factor(comments))) +
+  xlab("Reaction type") +
+  guides(fill=guide_legend(title="Comment?")) +
+  ggtitle("Facebook post reactions count")
+
+```
+
+Las micro-reacciones de "angry" son lejos las ganadoras. También se ve que quienes reaccionaron con "angry" fueron también los que más comentaron.
+
+```{r, eval=TRUE, echo=TRUE}
+
+chisq.test(table(reactions$from_type, reactions$comments))
+
+```
+
+De hecho, si esto lo leemos en términos de odds, si un usuario reacciona con "angry" en el post, es casi 3 veces más probable que comente.
+
+```{r, eval=TRUE, echo=TRUE}
+
+reactions$angry <- 0
+reactions$angry[reactions$from_type == "ANGRY"] <- 1
+summary(glm(reactions$comments ~ reactions$angry, family = "binomial"))
+my_glm <- summary(glm(reactions$comments ~ reactions$angry, family = "binomial"))
+exp(my_glm$coefficients[,1])
+
+```
+
+Sin embargo, este cálculo es sólo dentro de las personas que sí reaccionaron al post. Existe un gran número de personas que comentó, pero no reaccionó, o que comentó múltiples veces, lo que infla el número total de "comments".
+
+El "comment" con más "likes" de este post fue:
+
+> "Traten de cambiar el azul de fondo del logo, por un amarillo bien fuerte. Lo siento mucho cabros, pero los audios están, la gente ya los escuchó y lamentablemente queda en evidencia la jugada a la antigua que le hicieron a Mayol. Aún tienen tiempo de enmendarse, poco tiempo, pero lo tienen, ojalá lo hagan, si no, una lastima que por alguien como Jackson todo se derrumbe".
+
+Este "comment" obtuvo 384 "likes", y refleja el tenor general de los comentarios posteados en respuesta a este post.
+
+Resultados similares se pueden ver en las páginas de Revolución Democrática y Giorgio Jackson Diputado.
+
+---
+
+### **Conclusión**
+
+El análisis mostrado arriba entrega evidencia que sugiere que existiría un vínculo entre las micro-reacciones de "angry" y posteriormente postear un "comment" en el post del día 15 de agosto. El análisis de la tendencia muestra que, en efecto, el número de "comments" se dispara ese día, en conjunto con el número de micro-reacciones "angry". Es importante notar que esta posible relación sólo se da cuando los usuarios reaccionan a un post relacionado con el Frente Amplio. Se podría especular que este tipo de post apelan mucho más a la identidad grupal del usuario, y que un post de su coalición que dañe o atente contra esa identidad grupal, induce muchas más respuestas de mayor coste, como los son los comentarios en el post ("comments").
+
+De cualquier forma, este ejercicio resultó ser muy divertido, y lo comparto como una forma de ejemplificar el potencial que tiene el uso de datos de comportamiento en la red en el estudio de las relaciones sociales. En todo momento, en todo lugar que tenga conexión celular y acceso a Internet, se generar gigabytes y gigabytes de información respecto de la conducta social de los usuarios. Sería una lástima dejar que otras disciplinas tomen la delantera en un mundo de datos que pareciera que fue hecho para cientistas sociales.
+
+---
+
+### **Referencias**
+
+Julia C. Becker & Nicole Tausch (2015) A dynamic model of engagement in normative and non-normative collective action: Psychological antecedents, consequences, and barriers, European Review of Social Psychology, 26:1, 43-92, DOI:10.1080/10463283.2015.1094265
+
+Barbera, P., Piccirilli, M., Geisler, A., van Atteveldt, W. (2017) Rfacebook: Access to Facebook API via R. https://CRAN.R-project.org/package=Rfacebook
+
+Kende, A., van Zomeren, M., Ujhelyi, A., & Lantos, N. A. (2016). The social affirmation use of social media as a motivator of collective action. Journal of Applied Social Psychology, 46(8), 453-469.
+
+Postmes, T., & Brunsting, S. (2002). Collective action in the age of the Internet: Mass communication and online mobilization. Social Science Computer Review, 20(3), 290-301.
+
+Robinson, D. (2016, August 09). Text analysis of Trump's tweets confirms he writes only the (angrier) Android half [Web log post]. Retrieved August 23, 2017, from http://varianceexplained.org
